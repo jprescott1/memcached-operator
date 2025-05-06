@@ -18,11 +18,15 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -120,9 +124,77 @@ func (r *MemcachedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	// TODO items to complete this method
-	// Check if Memcached instance is marked to be deleted
-	// Check if deployment already exists
+	// Check if Memcached instance is marked to be deleted, which is
+	// indicated by thhe deletion timestamp being set.
+	isMemcachedMarkedToBeDeleted := memcached.GetDeletionTimestamp() != nil
+	if isMemcachedMarkedToBeDeleted {
+		if controllerutil.ContainsFinalizer(memcached, memcachedFinalizer) {
+			log.Info("Performing Finalizer Operations for Memcached before delete CR")
+
+			// Add a status "Downgrade" to reflect that this resource began its process to be terminated.
+			meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeDegradedMemcached,
+				Status: metav1.ConditionUnknown, Reason: "Finalizing",
+				Message: fmt.Sprintf("Performing finalizer operations for the custom resource: %s ", memcached.Name)})
+
+			if err := r.Status().Update(ctx, memcached); err != nil {
+				log.Error(err, "Failed to update Memcached status")
+				return ctrl.Result{}, err
+			}
+
+			log.Info("Removing Finalizer for Memcached after successfully performing the operations")
+			if ok := controllerutil.RemoveFinalizer(memcached, memcachedFinalizer); !ok {
+				log.Error(err, "Failed to remove finalizer for Memcached")
+				return ctrl.Result{}, err
+			}
+
+			if err := r.Update(ctx, memcached); err != nil {
+				log.Error(err, "Failed to remove finalizer for Memcached")
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+	// Check if deployment already exists, if not create a new one
+	found := &appsv1.Deployment{}
+	err = r.Get(ctx, types.NamespacedName{Name: memcached.Name, Namespace: memcached.Namespace}, found)
+	if err != nil && apierrrors.IsNotFound(err) {
+		// Define a new deployment
+		dep, err := r.deploymentForMemcached(memcached)
+		if err != nil {
+			log.Error(err, "Failed to define new Deployment resource for Memcached")
+
+			// The following implementation will update the status
+			meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached,
+				Status: metav1.ConditionFalse, Reason: "Reconciling",
+				Message: fmt.Sprintf("Failed to create Deployment for the custom resource (%s): (%s)", memcached.Name, err)})
+
+			if err := r.Status().Update(ctx, memcached); err != nil {
+				log.Error(err, "Failed to update Memcached status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+
+		log.Info("Creating a new Deployment",
+			"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
+		if err = r.Create(ctx, dep); err != nil {
+			log.Error(err, "Failed to create new Deployment",
+				"Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
+			return ctrl.Result{}, err
+		}
+
+		// Deployment created successfully
+		// We will requeue the reconciliation so that we can ensure the state
+		// and move forward for the next operations
+		return ctrl.Result{RequeueAfter: time.Minute}, nil
+	} else if err != nil {
+		log.Error(err, "Failed to get Deployment")
+		return ctrl.Result{}, err
+	}
+
+	// TODO
+	// Ensure deployment size is same as defined via Size spec of the CR
 
 	return ctrl.Result{}, nil
 }
