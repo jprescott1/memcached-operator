@@ -364,9 +364,9 @@ func labelsForMemcached(name string) map[string]string {
 	if err == nil {
 		imageTag = strings.Split(image, ":")[1]
 	}
-	return map[string]string{"app.kubernetes.io/name": "memcached-operator"
-			"app.kubernetes.io/version": imageTag,
-			"app.kubernetes.io/managed-by": "MemcachedController",
+	return map[string]string{"app.kubernetes.io/name": "memcached-operator",
+		"app.kubernetes.io/version":    imageTag,
+		"app.kubernetes.io/managed-by": "MemcachedController",
 	}
 }
 
