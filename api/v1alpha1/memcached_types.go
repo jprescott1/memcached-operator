@@ -29,10 +29,12 @@ type MemcachedSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// Size defines the number of Memcached instances
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
 	Size int32 `json:"size,omitempty"`
 
 	// Port defines the port that will be used to init the container with the image
-	ContainerPort int32 `json:"containerPort,omitemtpy"`
+	// +operator-sdk:csv:customresourcedefinitions:type=spec
+	ContainerPort int32 `json:"containerPort,omitempty"`
 }
 
 // MemcachedStatus defines the observed state of Memcached
@@ -48,6 +50,7 @@ type MemcachedStatus struct {
 // +kubebuilder:subresource:status
 
 // Memcached is the Schema for the memcacheds API
+// +kubebuilder:subresource:status
 type Memcached struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
