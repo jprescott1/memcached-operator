@@ -19,9 +19,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -232,12 +235,154 @@ func (r *MemcachedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	return ctrl.Result{}, nil
 }
 
-// TODO
-// Add missing deploymentForMemcached method
+func (r *MemcachedReconciler) doFinalizerOperationsForMemcached(cr *cachev1alpha1.Memcached) {
+	// TODO: Add the cleanup steps that the operator
+	// needs to do before the CR can be deleted. Examples
+	// of finalizers include performing backups and deleting
+	// resources that are not owned by this CR, like a PVC.
+
+	// Note: It is not recommended to use finalizers with the purpose of deleting resources which are
+	// created and managed in the reconciliation. These ones, such as the Deployment created on this reconcile,
+	// are defined as dependent of the custom resource. See that we use the method ctrl.SetControllerReference.
+	// to set the ownerRef which means that the Deployment will be deleted by the Kubernetes API.
+	// More info: https://kubernetes.io/docs/tasks/administer-cluster/use-cascading-deletion/
+
+	// The following implementation will raise an event
+	r.Recorder.Event(cr, "Warning", "Deleting",
+		fmt.Sprintf("Custom resource %s is being deleted from the namespace %s",
+			cr.Name,
+			cr.Namespace))
+}
+
+func (r *MemcachedReconciler) deploymentForMemcached(
+	memcached *cachev1alpha1.Memcached) (*appsv1.Deployment, error) {
+	ls := labelsForMemcached(memcached.Name)
+	replicas := memcached.Spec.Size
+
+	image, err := imageForMemcached()
+	if err != nil {
+		return nil, err
+	}
+
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      memcached.Name,
+			Namespace: memcached.Namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: ls,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: ls,
+				},
+				Spec: corev1.PodSpec{
+					// TODO(user): Uncomment the following code to configure the nodeAffinity expression
+					// according to the platforms which are supported by your solution. It is considered
+					// best practice to support multiple architectures. build your manager image using the
+					// makefile target docker-buildx. Also, you can use docker manifest inspect <image>
+					// to check what are the platforms supported.
+					// More info: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#node-affinity
+					//Affinity: &corev1.Affinity{
+					//	NodeAffinity: &corev1.NodeAffinity{
+					//		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					//			NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					//				{
+					//					MatchExpressions: []corev1.NodeSelectorRequirement{
+					//						{
+					//							Key:      "kubernetes.io/arch",
+					//							Operator: "In",
+					//							Values:   []string{"amd64", "arm64", "ppc64le", "s390x"},
+					//						},
+					//						{
+					//							Key:      "kubernetes.io/os",
+					//							Operator: "In",
+					//							Values:   []string{"linux"},
+					//						},
+					//					},
+					//				},
+					//			},
+					//		},
+					//	},
+					//},
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: &[]bool{true}[0],
+						// IMPORTANT: seccomProfile was introduced with Kubernetes 1.19
+						// If you are looking for to produce solutions to be supported
+						// on lower versions you must remove this option.
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
+					Containers: []corev1.Container{{
+						Image:           image,
+						Name:            "memcached",
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						// Ensure restrictive context for the container
+						// More info: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+						SecurityContext: &corev1.SecurityContext{
+							// WARNING: Ensure that the image used defines an UserID in the Dockerfile
+							// otherwise the Pod will not run and will fail with "container has runAsNonRoot and image has non-numeric user"".
+							// If you want your workloads admitted in namespaces enforced with the restricted mode in OpenShift/OKD vendors
+							// then, you MUST ensure that the Dockerfile defines a User ID OR you MUST leave the "RunAsNonRoot" and
+							// "RunAsUser" fields empty.
+							RunAsNonRoot: &[]bool{true}[0],
+							// The memcached image does not use a non-zero numeric user as the default user.
+							// Due to RunAsNonRoot field being set to true, we need to force the user in the
+							// container to a non-zero numeric user. We do this using the RunAsUser field.
+							// However, if you are looking to provide solution for K8s vendors like OpenShift
+							// be aware that you cannot run under its restricted-v2 SCC if you set this value.
+							RunAsUser:                &[]int64{1001}[0],
+							AllowPrivilegeEscalation: &[]bool{false}[0],
+							Capabilities: &corev1.Capabilities{
+								Drop: []corev1.Capability{
+									"ALL",
+								},
+							},
+						},
+						Ports: []corev1.ContainerPort{{
+							ContainerPort: memcached.Spec.ContainerPort,
+							Name:          "memcached",
+						}},
+						Command: []string{"memcached", "-m=64", "-o", "modern", "-v"},
+					}},
+				},
+			},
+		},
+	}
+	if err := ctrl.SetControllerReference(memcached, dep, r.Scheme); err != nil {
+		return nil, err
+	}
+	return dep, nil
+}
+
+func labelsForMemcached(name string) map[string]string {
+	var imageTag string
+	image, err := imageForMemcached()
+	if err == nil {
+		imageTag = strings.Split(image, ":")[1]
+	}
+	return map[string]string{"app.kubernetes.io/name": "memcached-operator"
+			"app.kubernetes.io/version": imageTag,
+			"app.kubernetes.io/managed-by": "MemcachedController",
+	}
+}
+
+func imageForMemcached() (string, error) {
+	var imageEnvVar = "MEMCACHED_IMAGE"
+	image, found := os.LookupEnv(imageEnvVar)
+	if !found {
+		return "", fmt.Errorf("Unable to find %s environment variable with the image", imageEnvVar)
+	}
+	return image, nil
+}
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *MemcachedReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&cachev1alpha1.Memcached{}).
+		Owns(&appsv1.Deployment{}).
 		Complete(r)
 }
