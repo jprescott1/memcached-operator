@@ -157,7 +157,7 @@ func (r *MemcachedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Check if deployment already exists, if not create a new one
 	found := &appsv1.Deployment{}
 	err = r.Get(ctx, types.NamespacedName{Name: memcached.Name, Namespace: memcached.Namespace}, found)
-	if err != nil && apierrrors.IsNotFound(err) {
+	if err != nil && apierrors.IsNotFound(err) {
 		// Define a new deployment
 		dep, err := r.deploymentForMemcached(memcached)
 		if err != nil {
@@ -193,11 +193,47 @@ func (r *MemcachedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	// TODO
-	// Ensure deployment size is same as defined via Size spec of the CR
+	// The following code will ensure the Deployment size is the same as define
+	// via the Size spec of the CR which we are reconciling.
+	size := memcached.Spec.Size
+	if *found.Spec.Replicas != size {
+		found.Spec.Replicas = &size
+		if err = r.Update(ctx, found); err != nil {
+			log.Error(err, "Failed to update Deployment",
+				"Deployment.Namespace", found.Namespace, "Deployment.Name", found.Name)
 
+			// Re-fetch the memcached CR before updating the status
+			if err := r.Get(ctx, req.NamespacedName, memcached); err != nil {
+				log.Error(err, "Failed to re-fetch memcached")
+				return ctrl.Result{}, err
+			}
+
+			meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached,
+				Status: metav1.ConditionFalse, Reason: "Resizing",
+				Message: fmt.Sprintf("Failed to update the size for the custom resource (%s): (%s)", memcached.Name, err)})
+
+			if err := r.Status().Update(ctx, memcached); err != nil {
+				log.Error(err, "Failed to update Memcached status")
+				return ctrl.Result{}, err
+			}
+
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+	meta.SetStatusCondition(&memcached.Status.Conditions, metav1.Condition{Type: typeAvailableMemcached,
+		Status: metav1.ConditionTrue, Reason: "Reconciling",
+		Message: fmt.Sprintf("Deployment for custom resource (%s) with %d replicas created successfully", memcached.Name, size)})
+
+	if err := r.Status().Update(ctx, memcached); err != nil {
+		log.Error(err, "Failed to update Memcached status")
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
+
+// TODO
+// Add missing deploymentForMemcached method
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *MemcachedReconciler) SetupWithManager(mgr ctrl.Manager) error {
