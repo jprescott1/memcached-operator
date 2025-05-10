@@ -1,2 +1,9 @@
 resources:
 - manager.yaml
+- ghcr-credentials-sealed.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+images:
+- name: controller
+  newName: ghcr.io/jprescott1/memcached-operator
+  newTag: 0.0.3
